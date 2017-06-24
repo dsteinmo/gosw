@@ -1,43 +1,19 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
-	"github.com/runningwild/go-fftw/fftw"
 	"math"
+	"os"
+
+	"github.com/kardianos/osext"
+	"github.com/runningwild/go-fftw/fftw"
 )
 
 func main() {
-	d10 := fftw.NewArray(10)
-
-	for i := 0; i < 10; i++ {
-		d10.Set(i, complex(float64(i), float64(0)))
-	}
-
-	fmt.Printf("d10:\n")
-	printArray(d10)
-
-	fmt.Printf("d10hat:\n")
-	d10hat := fftw.FFT(d10)
-	printArray(d10hat)
-
-	fmt.Printf("d10hatinv:\n")
-	d10hatinv := constTimesArray(fftw.IFFT(d10hat), 1.0/10.0)
-
-	printArray(d10hatinv)
-
-	Ny, Nx := 32, 32
+	// Grid size.
+	Ny, Nx := 128, 128
 	N := Nx * Ny
-
-	arr := fftw.NewArray2(Ny, Nx)
-
-	for i := 0; i < arr.N[0]; i++ {
-		for j := 0; j < arr.N[1]; j++ {
-			arr.Set(i, j, complex(float64(i), float64(j)))
-		}
-	}
-
-	fmt.Printf("2D Array \n")
-	printArray2(arr)
 
 	// physical parameters
 	g := 9.81 * 0.1
@@ -45,8 +21,11 @@ func main() {
 	H0 := 20.0
 	Lx := 5.0e3
 	Ly := 5.0e3
-	FINTIME := 300.0
+	FINTIME := 1000.0
 	CFL := 0.5
+	NUMOUTS := 20
+
+	outputInterval := FINTIME / float64(NUMOUTS)
 
 	fmt.Printf("g: %f, f0: %f, H0: %f, Lx: %f, Ly: %f, FINAL TIME: %f, CFL: %f\n", g, f0, H0, Lx, Ly, FINTIME, CFL)
 
@@ -56,20 +35,9 @@ func main() {
 	fmt.Printf("dx: %f, dy: %f\n", dx, dy)
 
 	x := constTimesArray(range1D(1, Nx), complex(dx, 0.0))
-	fmt.Printf("x: \n")
-	printArray(x)
-
 	y := constTimesArray(range1D(1, Ny), complex(dy, 0.0))
-	fmt.Printf("y: \n")
-	printArray(y)
 
 	xx, yy := meshGrid(x, y)
-
-	fmt.Printf("yy: \n")
-	printArray2(yy)
-
-	fmt.Printf("xx: \n")
-	printArray2(xx)
 
 	PI := 3.14159265358979323
 	dk := 2.0 * PI / Lx
@@ -79,20 +47,10 @@ func main() {
 	fmt.Printf("dl: %f\n", dl)
 
 	k := buildWaveNumber(Nx, Lx)
-	fmt.Printf("k:\n")
-	printArray(k)
-
 	l := buildWaveNumber(Ny, Ly)
-	fmt.Printf("l:\n")
-	printArray(l)
 
 	kk := repeatRows(k, Ny)
-	fmt.Printf("kk:\n")
-	printArray2(kk)
-
 	ll := repeatColumns(l, Nx)
-	fmt.Printf("ll:\n")
-	printArray2(ll)
 
 	cZero := complex(0.0, 0.0)
 	cI := complex(0.0, 1.0)
@@ -107,10 +65,6 @@ func main() {
 	NUMSTEPS := FINTIME / dt
 
 	fmt.Printf("c0: %f, dt: %f, NUM STEPS: %f\n", c0, dt, NUMSTEPS)
-
-	// u_t = -uux -vuy -g*eta_x +fv
-	// v_t = -uvx -vvy -g*eta_y -fu
-	// eta_t = -(hu)_x - (hv)_y
 
 	eta := fftw.NewArray2(Ny, Nx)
 	H := fftw.NewArray2(Ny, Nx)
@@ -128,15 +82,6 @@ func main() {
 			v.Set(i, j, cZero)
 		}
 	}
-
-	fmt.Printf("ikk:\n")
-	printArray2(ikk)
-
-	fmt.Printf("kk:\n")
-	printArray2(kk)
-
-	fmt.Printf("ill:\n")
-	printArray2(ill)
 
 	eta_np1 := fftw.NewArray2(Ny, Nx)
 	u_np1 := fftw.NewArray2(Ny, Nx)
@@ -158,6 +103,11 @@ func main() {
 
 	fftscale := complex(1.0/float64(N), 0.0)
 
+	// u_t = -uux -vuy -g*eta_x +fv
+	// v_t = -uvx -vvy -g*eta_y -fu
+	// eta_t = -(hu)_x - (hv)_y
+	t2 := 0.0
+	tstep := 0
 	for t := 0.0; t < FINTIME; t += dt {
 		hu = Array2TimesArray2(h, u)
 		hv = Array2TimesArray2(h, v)
@@ -189,11 +139,48 @@ func main() {
 
 		fmt.Printf("t=%f\n", t+dt)
 
+		t2 += dt
+		if t2 > outputInterval || t == 0.0 || t+dt >= FINTIME {
+			fmt.Printf("outputing.\n")
+			outputArray2("h", tstep, h_np1)
+			outputArray2("u", tstep, u_np1)
+			outputArray2("v", tstep, v_np1)
+			t2 = 0.0
+		}
+
+		tstep++
+
+	}
+}
+
+func check(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
+
+func outputArray2(prefix string, tstep int, a *fftw.Array2) {
+
+	cwd, err := osext.ExecutableFolder()
+	check(err)
+
+	fullFileName := fmt.Sprintf("%s/%s%07d.dat", cwd, prefix, tstep)
+	f, err := os.Create(fullFileName)
+	check(err)
+	defer f.Close()
+
+	w := bufio.NewWriter(f)
+
+	for i := 0; i < a.N[0]; i++ {
+		for j := 0; j < a.N[1]; j++ {
+			_, err = fmt.Fprintf(w, "%1.4f ", real(a.At(i, j)))
+			check(err)
+		}
+		_, err = fmt.Fprintf(w, "\n")
+		check(err)
 	}
 
-	fmt.Printf("h:\n")
-	printArray2(h_np1)
-
+	w.Flush()
 }
 
 // Allocates new memory for wavenumber array.
